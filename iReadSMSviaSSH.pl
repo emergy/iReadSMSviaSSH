@@ -7,7 +7,7 @@
 =head1 SYNOPSIS
 
     iReadSMSviaSSH [OPTIONS] mobile@host
-    iReadSMSviaSSH -f sms.db
+    iReadSMSviaSSH -f sms.db [-a AddressBook.sqlitedb]
 
 =head1 OPTIONS
 
@@ -17,11 +17,7 @@
 
 This message
 
-=item verbose (v)
-
-Verbose mode
-
-=ietm ssh-key (i)
+=item ssh-key (i)
 
 Selects the file from which the identity (private key) for public key authentication is read.
             This option is directly passed to ssh(1)
@@ -48,6 +44,10 @@ Add service name to after every messase
 
 Not check known_hosts file
 
+=item address-book-file (a)
+
+Use address book file
+
 =back
 
 =cut
@@ -67,13 +67,13 @@ my $config = {};
 Getopt::Long::Configure ("bundling");
 GetOptions(
     "help|h|?"            => sub { usage() },
-    "verbose|v+"          => \$config->{verbose},
     "ssh-key|i=s"         => \$config->{'ssh-key'},
     "ssh-port|p=s"        => \$config->{'ssh-port'},
     "ssh-options|o=s"     => \$config->{'ssh-options'},
     "file|f=s"            => \$config->{'file'},
     "save-read-time|t"    => \$config->{'save-read-time'},
     "save-service-name|s" => \$config->{'save-service-name'},
+    "address-book-file|a" => \$config->{'address-book'},
     "key-checking-no|n"   => sub {
         $config->{'ssh-options'} .= ' -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no ';
     },
@@ -84,29 +84,36 @@ my $ip = shift(@ARGV);
 usage() if ! $ip and ! $config->{'file'};
 
 if ($config->{'file'}) {
-    read_sms($config->{'file'});
+    read_sms($config->{'file'}, $config->{'address-book'});
     exit;
 }
 
 if ($ip) {
     mkdir "$Bin/var" unless -e "$Bin/var";
     my $options = $config->{'ssh-options'} ||= '';
+
     my $key = "-i $config->{'ssh-key'}" if $config->{'ssh-key'};
     $key = '' unless $key;
+
     $options .= "-o Port=$config->{'ssh-port'}" if $config->{'ssh-port'};
-    print "Copy $ip:/private/var/mobile/Library/SMS/sms.db to $Bin/var/sms.db" if $config->{verbose};
-    system("scp $key $options $ip:/private/var/mobile/Library/SMS/sms.db '$Bin/var/sms.db'");
-    read_sms("$Bin/var/sms.db");
+
+    print "Copy $ip:/private/var/mobile/Library/SMS/sms.db to $Bin/var/";
+    system("scp $key $options $ip:/private/var/mobile/Library/SMS/sms.db '$Bin/var/'");
+
+    print "Copy $ip:/private/var/mobile/Library/AddressBook/AddressBook.sqlitedb to $Bin/var/";
+    system("scp $key $options $ip:/private/var/mobile/Library/AddressBook/AddressBook.sqlitedb '$Bin/var/'");
+
+    read_sms("$Bin/var/sms.db", "$Bin/var/AddressBook.sqlitedb");
 }
 
 sub read_sms {
-    my ($file) = @_;
+    my ($sms_db_file, $address_book_db_file) = @_;
 
     unless (-e "$Bin/sms") {
         mkdir "$Bin/sms" or die "Can't create dir \"$Bin/sms\": $!\n";
     }
 
-    my $db = DBI->connect("dbi:SQLite:$file","","", {RaiseError => 1, AutoCommit => 1});
+    my $db = DBI->connect("dbi:SQLite:$sms_db_file","","", {RaiseError => 1, AutoCommit => 1});
 
     my $sth = $db->prepare(qq{
         SELECT 
@@ -163,16 +170,80 @@ sub read_sms {
     }
 
     while (my ($phone_number, $sms_array) = each %$h) {
-        $phone_number =~ s/^\+//;
-        print "Save \"$Bin/sms/$phone_number\"\n" if $config->{'verbose'};
+        my $card;
+        $phone_number =~ s/^(\+7|8)$//;
+
+        if ($address_book_db_file) {
+            ($phone_number, $card) = get_contact($phone_number, $address_book_db_file);
+        }
+
+        print "Save \"$Bin/sms/$phone_number\"\n";
         open my $chat_file, ">", "$Bin/sms/$phone_number" or die
             "Can't create chat file \"$Bin/sms/$phone_number\": $!\n";
 
+        print $chat_file $card . "\n\n" if $card;
         print $chat_file join("\n", @$sms_array);
         close $chat_file;
     }
 
     print "Total $i SMS\n";
+}
+
+sub get_contact {
+    my ($phone_number, $address_book_db_file) = @_;
+
+    my $db = DBI->connect("dbi:SQLite:$address_book_db_file","","", {RaiseError => 1, AutoCommit => 1});
+
+    my $sth = $db->prepare(qq{    
+        SELECT
+            ABPerson.first as First,
+            ABPerson.last as Last,
+            ABMultiValue.value as Phone,
+            ABPerson.note as Note,
+            ABPerson.nickname as Nick,
+            ABPerson.organization as Organization,
+            ABPerson.department as Department,
+            ABPerson.jobtitle as Jobtitle
+        FROM ABPerson,ABMultiValue 
+        WHERE ABMultiValue.record_id = ABPerson.ROWID
+    });
+
+    $sth->execute() or die "Can't execute query to Address Book DB\n";
+
+    while (my $res = $sth->fetchrow_hashref) {
+        next unless $res->{'Phone'};
+        my $cmp = $res->{'Phone'};
+
+        if ($cmp) {
+            $cmp =~ s/^(\+7|8)//;
+            $cmp =~ s/[\(\)\+\-\s]+//g;
+        }
+
+        $phone_number =~ s/^(\+7|8)//;
+        $phone_number =~ s/[\(\)\+\-\s]+//g;
+
+        if ($phone_number eq $cmp) {
+            my $card;
+            $card .= "First name: " . $res->{'First'} . "\n" if $res->{'First'};
+            $card .= "Last name: " . $res->{'Last'} . "\n" if $res->{'Last'};
+            $card .= "Nick name: " . $res->{'Nick'} . "\n" if $res->{'Nick'};
+            $card .= "Phone: " . $res->{'Phone'} . "\n" if $res->{'Phone'};
+            $card .= "Note: " . $res->{'Note'} . "\n" if $res->{'Note'};
+            $card .= "Organization: " . $res->{'Organization'} . "\n" if $res->{'Organization'};
+            $card .= "Department: " . $res->{'Department'} . "\n" if $res->{'Department'};
+            $card .= "Jobtitle: " . $res->{'Jobtitle'} . "\n" if $res->{'Jobtitle'};
+    
+            my $name;
+            $name .= $res->{'First'} . " " if $res->{'First'};
+            $name .= $res->{'Last'} . " " if $res->{'Last'};
+            $name .= $res->{'Nick'} . " " if $res->{'Nick'};
+            $name =~ s/\s+$//;
+
+            return ($name, $card);
+        }
+    }
+
+    return ($phone_number, '');
 }
 
 sub usage {
