@@ -160,7 +160,7 @@ sub read_sms {
         $line .= $res->{'Service'} . ' '  if $config->{'save-service-name'};
         $line .= $res->{'Date Read/Sent'} if $config->{'save-read-time'};
 
-        push @{$h->{ $res->{'Phone Number'} }}, $line;
+        push @{$h->{ get10num($res->{'Phone Number'}) }}, $line;
     }
 
     $db->disconnect;
@@ -174,7 +174,7 @@ sub read_sms {
         $phone_number =~ s/^(\+7|8)$//;
 
         if ($address_book_db_file) {
-            ($phone_number, $card) = get_contact($phone_number, $address_book_db_file);
+            ($phone_number, $card) = get_contact(get10num($phone_number), $address_book_db_file);
         }
 
         print "Save \"$Bin/sms/$phone_number\"\n";
@@ -212,15 +212,7 @@ sub get_contact {
 
     while (my $res = $sth->fetchrow_hashref) {
         next unless $res->{'Phone'};
-        my $cmp = $res->{'Phone'};
-
-        if ($cmp) {
-            $cmp =~ s/^(\+7|8)//;
-            $cmp =~ s/[\(\)\+\-\s]+//g;
-        }
-
-        $phone_number =~ s/^(\+7|8)//;
-        $phone_number =~ s/[\(\)\+\-\s]+//g;
+        my $cmp = get10num($res->{'Phone'});
 
         if ($phone_number eq $cmp) {
             my $card;
@@ -244,6 +236,15 @@ sub get_contact {
     }
 
     return ($phone_number, '');
+}
+
+sub get10num {
+    map {
+        s/^(\+7|8)//;
+        s/[\(\)\+\-\s]+//g;
+    } @_;
+
+    return shift;
 }
 
 sub usage {
