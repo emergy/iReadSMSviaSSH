@@ -178,7 +178,7 @@ sub read_sms {
         }
 
         print "Save \"$Bin/sms/$phone_number\"\n";
-        open my $chat_file, ">", "$Bin/sms/$phone_number" or die
+        open my $chat_file, ">>", "$Bin/sms/$phone_number" or die
             "Can't create chat file \"$Bin/sms/$phone_number\": $!\n";
 
         print $chat_file $card . "\n\n" if $card;
